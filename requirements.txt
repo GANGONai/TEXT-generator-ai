@@ -1,0 +1,15 @@
+# Core ML stack — all open source, all free.
+# Versions are pinned with a sensible lower bound so the project works
+# both on Google Colab (PyTorch is pre-installed) and on a fresh machine.
+torch>=2.0
+transformers>=4.36
+accelerate>=0.25
+sentencepiece>=0.1.99
+safetensors>=0.4.0
+
+# UI / runtime
+gradio>=4.20
+
+# Misc
+huggingface_hub>=0.20
+tqdm>=4.66
