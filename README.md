@@ -77,12 +77,23 @@ REPO = 'https://github.com/GANGONai/TEXT-generator-ai.git'
 DIR  = pathlib.Path('/content/TEXT-generator-ai')
 if not DIR.exists():
     subprocess.check_call(['git', 'clone', '--depth', '1', REPO, str(DIR)])
+else:
+    subprocess.check_call(['git', '-C', str(DIR), 'pull', '--ff-only'])
 os.chdir(DIR)
+sys.path.insert(0, str(DIR))
 subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', '-r', 'requirements.txt'])
-subprocess.check_call([sys.executable, 'app.py', '--share', '--no-browser'])
+
+# Import and launch directly — the public *.gradio.live URL prints
+# into THIS cell's output (using subprocess would buffer it).
+from app import launch
+launch()  # auto-detects Colab → share=True, inbrowser=False
 ```
 
-Gradio prints a public `https://*.gradio.live` URL — open it to use the app.
+The cell keeps running while the server is up — that is normal. Look for a
+line like `Running on public URL: https://xxxx.gradio.live` and open it.
+
+To stop the app, click the ⏹ *interrupt* button in Colab. To re-launch later,
+re-run the cell.
 
 Or open the ready-made notebook: [`notebooks/colab_run.ipynb`](./notebooks/colab_run.ipynb).
 
@@ -110,11 +121,19 @@ python app.py
 
 Then open <http://localhost:7860>.
 
+You can also import `launch()` from any Python session / notebook:
+
+```python
+from app import launch
+launch()                 # local server on port 7860
+launch(share=True)       # also expose a public *.gradio.live URL
+```
+
 CLI flags:
 
 | Flag           | Default   | Purpose                                  |
 |----------------|-----------|------------------------------------------|
-| `--share`      | `false`   | Expose a public `*.gradio.live` URL.     |
+| `--share`      | `false`   | Expose a public `*.gradio.live` URL (auto-on in Colab). |
 | `--port`       | `7860`    | Local port.                              |
 | `--host`       | `0.0.0.0` | Bind host.                               |
 | `--no-browser` | `false`   | Don't open a browser automatically.      |
