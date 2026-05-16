@@ -25,6 +25,7 @@ from ..datasets.manager import SongManager
 from ..logger import get_logger
 from ..models.manager import ModelManager
 from ..utils import human_duration, now_iso
+from .device import GPUInfo, get_gpu_info, require_gpu
 
 log = get_logger(__name__)
 
@@ -124,12 +125,26 @@ class LyricsTrainer:
         flag.set()
         return True
 
+    @classmethod
+    def gpu_info(cls) -> GPUInfo:
+        """Convenience wrapper around :func:`get_gpu_info` for the UI."""
+
+        return get_gpu_info()
+
     def start(
         self,
         model_name_or_slug: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> TrainingState:
-        """Kick off training in a background thread."""
+        """Kick off training in a background thread.
+
+        Raises ``RuntimeError`` immediately if no CUDA GPU is available on the
+        host — we refuse to train on CPU because it is unusably slow.
+        """
+
+        # Fail fast: no GPU → no training. The error message guides the user
+        # to enable a GPU runtime in Colab.
+        info = require_gpu()
 
         meta = self.models.load_meta(model_name_or_slug)
         slug = meta.slug
@@ -145,10 +160,12 @@ class LyricsTrainer:
 
         state = TrainingState(
             status="preparing",
-            message="Подготовка данных…",
+            message=f"GPU OK: {info.name} — подготовка данных…",
             total_epochs=int(merged_params["epochs"]),
             samples=len(songs),
             batch_size=int(merged_params["batch_size"]),
+            device="cuda",
+            fp16=bool(merged_params.get("fp16", True)),
             started_at=now_iso(),
         )
         with self._lock:
@@ -184,22 +201,34 @@ class LyricsTrainer:
         from torch.utils.data import DataLoader, Dataset
         from transformers import AutoModelForCausalLM, AutoTokenizer, get_linear_schedule_with_warmup
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        fp16 = bool(params.get("fp16", True)) and device == "cuda"
+        # Hard requirement: we already checked in start(), but re-check here
+        # in case the thread was paused long enough for CUDA to disappear.
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA исчезла между стартом и началом обучения. "
+                "Перезапустите runtime и включите GPU."
+            )
 
-        state = self._update_state(
+        device = "cuda"
+        fp16 = bool(params.get("fp16", True))
+
+        hf_id = BASE_MODELS[base_model_key].hf_id
+        self._update_state(
             slug,
             status="preparing",
-            message="Загрузка базовой модели…",
+            message=f"Скачиваю токенизатор «{hf_id}»…",
             device=device,
             fp16=fp16,
         )
-
-        hf_id = BASE_MODELS[base_model_key].hf_id
         tokenizer = AutoTokenizer.from_pretrained(hf_id)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        self._update_state(
+            slug,
+            status="preparing",
+            message=f"Скачиваю веса «{hf_id}» (~50–500 МБ, может занять минуту)…",
+        )
         model = AutoModelForCausalLM.from_pretrained(hf_id)
         if params.get("gradient_checkpointing"):
             try:
@@ -207,10 +236,12 @@ class LyricsTrainer:
                 model.config.use_cache = False
             except Exception:  # pragma: no cover - some models reject it
                 pass
+        self._update_state(slug, message="Переношу модель на GPU…")
         model.to(device)
         model.train()
 
         # --- build dataset -------------------------------------------------
+        self._update_state(slug, message="Готовлю датасет (токенизация)…")
         songs = SongManager(self.models.songs_path(slug)).list()
         block_size = int(params["block_size"])
         eos = tokenizer.eos_token or ""

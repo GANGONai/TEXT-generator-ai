@@ -16,17 +16,24 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     """Build Gradio components for the Upload tab (called inside ``gr.Tab``)."""
 
     def _model_choices() -> List[str]:
-        return models.list_names() or ["(нет моделей)"]
+        return models.list_names()
+
+    def _valid_value(current: Optional[str], choices: List[str]) -> Optional[str]:
+        """Pick a still-valid dropdown value after the model list changes."""
+
+        if current and current in choices:
+            return current
+        return choices[0] if choices else None
 
     def _song_choices(model_name: str) -> List[str]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return []
         meta = models.load_meta(model_name)
         sm = SongManager(models.songs_path(meta.slug))
         return [f"{s.id} | {s.title}" for s in sm.list()]
 
     def _song_count(model_name: str) -> str:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return ""
         meta = models.load_meta(model_name)
         sm = SongManager(models.songs_path(meta.slug))
@@ -38,7 +45,13 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     with gr.Row():
         # LEFT: model + song list
         with gr.Column(scale=1):
-            model_dd = gr.Dropdown(label="Модель", choices=_model_choices(), interactive=True)
+            _initial = _model_choices()
+            model_dd = gr.Dropdown(
+                label="Модель",
+                choices=_initial,
+                value=_initial[0] if _initial else None,
+                interactive=True,
+            )
             refresh_btn = gr.Button("🔄 Обновить", size="sm")
             stats_md = gr.Markdown("")
             search_in = gr.Textbox(label="🔍 Поиск по песням", placeholder="Введите запрос…")
@@ -73,6 +86,17 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     # ---- training section ----
     gr.Markdown("---")
     gr.Markdown("### 🏋️ Обучение модели")
+    gr.Markdown(
+        "Обучение требует GPU. На бесплатном Colab включите его так: "
+        "`Runtime → Change runtime type → Hardware accelerator → T4 GPU`, "
+        "затем перезапустите ячейку с приложением."
+    )
+    with gr.Row():
+        gpu_info_md = gr.Markdown(
+            trainer.gpu_info().human_summary(),
+            elem_classes="gpu-info",
+        )
+        gpu_check_btn = gr.Button("🔎 Проверить GPU", size="sm")
     with gr.Row():
         with gr.Column(scale=1):
             epochs_sl = gr.Slider(1, 20, value=3, step=1, label="Эпохи")
@@ -93,6 +117,11 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
             )
             poll_btn = gr.Button("🔄 Обновить статус", size="sm")
 
+    def check_gpu() -> str:
+        return trainer.gpu_info().human_summary()
+
+    gpu_check_btn.click(fn=check_gpu, outputs=gpu_info_md)
+
     # ---- hidden state to track current editing song id ----
     current_song_id = gr.State(value=None)
 
@@ -100,13 +129,18 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     def refresh(model_name: str) -> Tuple[Any, Any, Any]:
         choices = _song_choices(model_name)
         stats = _song_count(model_name)
-        return gr.update(choices=choices, value=None), stats, gr.update(choices=_model_choices())
+        model_choices = _model_choices()
+        return (
+            gr.update(choices=choices, value=None),
+            stats,
+            gr.update(choices=model_choices, value=_valid_value(model_name, model_choices)),
+        )
 
     refresh_btn.click(fn=refresh, inputs=model_dd, outputs=[song_list, stats_md, model_dd])
     model_dd.change(fn=refresh, inputs=model_dd, outputs=[song_list, stats_md, model_dd])
 
     def search_songs(model_name: str, query: str) -> Any:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return gr.update(choices=[])
         meta = models.load_meta(model_name)
         sm = SongManager(models.songs_path(meta.slug))
@@ -139,7 +173,7 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
         genre: str,
         existing_id: Optional[str],
     ) -> Tuple[Any, str, Optional[str]]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return gr.update(), "Сначала выберите модель.", existing_id
         meta = models.load_meta(model_name)
         sm = SongManager(models.songs_path(meta.slug))
@@ -184,7 +218,7 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     )
 
     def do_import(model_name: str, file_obj: Any) -> Tuple[Any, str]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return gr.update(), "Сначала выберите модель."
         if file_obj is None:
             return gr.update(), "Файл не загружен."
@@ -206,7 +240,7 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
 
     # ---- training ----
     def start_training(model_name: str, epochs: int, lr: float, bs: int, block: int) -> Tuple[str, float]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return "Сначала выберите модель.", 0
         try:
             state = trainer.start(
@@ -229,7 +263,7 @@ def build_upload_tab(models: ModelManager, trainer: LyricsTrainer) -> None:
     )
 
     def poll_training(model_name: str) -> Tuple[str, float]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return "", 0
         meta = models.load_meta(model_name)
         state = trainer.get_state(meta.slug)
