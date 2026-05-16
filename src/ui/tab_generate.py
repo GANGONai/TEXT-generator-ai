@@ -22,16 +22,27 @@ def build_generate_tab(
     """Build Gradio components for the Generator tab (called inside ``gr.Tab``)."""
 
     def _model_choices() -> List[str]:
-        return models.list_names() or ["(нет моделей)"]
+        return models.list_names()
+
+    def _valid_value(current: Optional[str], choices: List[str]) -> Optional[str]:
+        """Return ``current`` if it is still in ``choices``; otherwise the first
+        choice (or ``None`` when the list is empty). This keeps Gradio 4 from
+        rejecting a stale dropdown value after the model list changes."""
+
+        if current and current in choices:
+            return current
+        return choices[0] if choices else None
 
     # ---- header info ----
     gr.Markdown("Выберите модель, задайте название / тему и нажмите **Генерировать**.")
 
     with gr.Row():
         with gr.Column(scale=2):
+            initial = _model_choices()
             model_dd = gr.Dropdown(
                 label="Модель",
-                choices=_model_choices(),
+                choices=initial,
+                value=initial[0] if initial else None,
                 interactive=True,
             )
             refresh_btn = gr.Button("🔄 Обновить список", size="sm")
@@ -70,10 +81,11 @@ def build_generate_tab(
         hist_refresh = gr.Button("Обновить историю", size="sm")
 
     # ---- callbacks ----
-    def refresh_models() -> Dict[str, Any]:
-        return gr.update(choices=_model_choices())
+    def refresh_models(current: Optional[str]) -> Dict[str, Any]:
+        choices = _model_choices()
+        return gr.update(choices=choices, value=_valid_value(current, choices))
 
-    refresh_btn.click(fn=refresh_models, outputs=model_dd)
+    refresh_btn.click(fn=refresh_models, inputs=model_dd, outputs=model_dd)
 
     def do_generate(
         model_name: str,
@@ -88,7 +100,7 @@ def build_generate_tab(
         rep: float,
         seed: Optional[float],
     ) -> Tuple[str, str]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return "### Ошибка", "Сначала создайте модель на вкладке «Модели»."
         req = GenerationRequest(
             model=model_name,
@@ -137,7 +149,7 @@ def build_generate_tab(
     ).then(fn=lambda: gr.update(visible=True), outputs=download_file)
 
     def refresh_history(model_name: str) -> Dict[str, Any]:
-        if not model_name or model_name == "(нет моделей)":
+        if not model_name:
             return gr.update(choices=[])
         meta = models.load_meta(model_name)
         items = history_store.list(meta.slug)
