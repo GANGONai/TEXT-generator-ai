@@ -48,6 +48,14 @@ def build_generate_tab(
             refresh_btn = gr.Button("🔄 Обновить список", size="sm")
             title_in = gr.Textbox(label="Название песни", placeholder="Оставьте пустым для авто")
             theme_in = gr.Textbox(label="Тема / описание", lines=2, placeholder="О чём должна быть песня?")
+            seed_text_in = gr.Textbox(
+                label="Ваш текст для продолжения (необязательно)",
+                lines=8,
+                placeholder=(
+                    "Вставьте свой текст — AI продолжит его в том же стиле. "
+                    "Оставьте пустым — AI напишет песню с нуля."
+                ),
+            )
             genre_dd = gr.Dropdown(label="Жанр", choices=GENRES, value="Auto")
             lang_dd = gr.Dropdown(
                 label="Язык",
@@ -57,6 +65,23 @@ def build_generate_tab(
 
         with gr.Column(scale=1):
             gr.Markdown("#### Параметры генерации")
+            ai_addition_sl = gr.Slider(
+                0, 500, value=100, step=10,
+                label="Сколько AI добавит от себя, %",
+                info=(
+                    "Относительно длины вашего текста. 0% = вернуть ваш текст без изменений, "
+                    "100% = AI напишет столько же, 500% = AI допишет в 5 раз больше. "
+                    "Игнорируется, если ваш текст пуст — тогда работает «Макс. токенов» ниже."
+                ),
+            )
+            rhyme_sl = gr.Slider(
+                0, 100, value=0, step=10,
+                label="Доля рифм, %",
+                info=(
+                    "Подсказка модели стараться рифмовать окончания строк. "
+                    "Точное соблюдение не гарантировано — фактический % покажем в результате."
+                ),
+            )
             max_tokens = gr.Slider(64, 1024, value=DEFAULT_GENERATION_PARAMS["max_new_tokens"], step=16, label="Макс. токенов")
             temperature = gr.Slider(0.1, 2.0, value=DEFAULT_GENERATION_PARAMS["temperature"], step=0.05, label="Temperature")
             top_p = gr.Slider(0.1, 1.0, value=DEFAULT_GENERATION_PARAMS["top_p"], step=0.05, label="Top-p")
@@ -70,6 +95,7 @@ def build_generate_tab(
     with gr.Column(elem_classes="result-card"):
         result_title = gr.Markdown("### *(результат появится здесь)*")
         result_text = gr.Textbox(label="Текст песни", lines=16, interactive=False, show_copy_button=True)
+        result_stats = gr.Markdown("")
         with gr.Row():
             download_btn = gr.Button("⬇ Скачать TXT")
             download_file = gr.File(visible=False, label="Файл")
@@ -91,17 +117,24 @@ def build_generate_tab(
         model_name: str,
         title: str,
         theme: str,
+        seed_text: str,
         genre: str,
         language: str,
+        ai_addition: float,
+        rhyme: float,
         max_tok: int,
         temp: float,
         tp: float,
         tk: int,
         rep: float,
         seed: Optional[float],
-    ) -> Tuple[str, str]:
+    ) -> Tuple[str, str, str]:
         if not model_name:
-            return "### Ошибка", "Сначала создайте модель на вкладке «Модели»."
+            return (
+                "### Ошибка",
+                "Сначала создайте модель на вкладке «Модели».",
+                "",
+            )
         req = GenerationRequest(
             model=model_name,
             title=title,
@@ -114,21 +147,47 @@ def build_generate_tab(
             top_k=int(tk),
             repetition_penalty=rep,
             seed=int(seed) if seed is not None and seed == seed else None,
+            seed_text=seed_text or "",
+            ai_addition_pct=int(ai_addition),
+            rhyme_pct=int(rhyme),
         )
         try:
             result = generator.generate(req)
         except Exception as exc:
-            return "### Ошибка генерации", str(exc)
+            return "### Ошибка генерации", str(exc), ""
         # persist to history
         meta = models.load_meta(model_name)
         history_store.add(meta.slug, result)
         header = f"### {result.title}"
-        return header, result.text
+
+        stats_parts = []
+        rhyme_target = result.params.get("rhyme_pct_target", 0)
+        rhyme_actual = result.params.get("rhyme_pct_actual", 0.0)
+        if rhyme_target or rhyme_actual:
+            stats_parts.append(
+                f"🎶 Рифмы: **{rhyme_actual}%** факт / **{rhyme_target}%** цель"
+            )
+        ai_pct = result.params.get("ai_addition_pct")
+        added = result.params.get("max_new_tokens")
+        if added is not None:
+            if req.seed_text.strip():
+                stats_parts.append(f"✍️ AI дописал ~{added} токенов ({ai_pct}% от вашего текста)")
+            else:
+                stats_parts.append(f"✍️ AI написал ~{added} токенов")
+        if result.params.get("note"):
+            stats_parts.append(f"ℹ️ {result.params['note']}")
+        stats_md = "  ·  ".join(stats_parts)
+        return header, result.text, stats_md
 
     gen_btn.click(
         fn=do_generate,
-        inputs=[model_dd, title_in, theme_in, genre_dd, lang_dd, max_tokens, temperature, top_p, top_k, rep_penalty, seed_in],
-        outputs=[result_title, result_text],
+        inputs=[
+            model_dd, title_in, theme_in, seed_text_in,
+            genre_dd, lang_dd,
+            ai_addition_sl, rhyme_sl,
+            max_tokens, temperature, top_p, top_k, rep_penalty, seed_in,
+        ],
+        outputs=[result_title, result_text, result_stats],
     )
 
     def download_txt(title_md: str, text: str) -> Optional[str]:

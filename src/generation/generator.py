@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import DEFAULT_GENERATION_PARAMS
 from ..logger import get_logger
@@ -33,6 +34,10 @@ class GenerationRequest:
     top_k: int = 50
     repetition_penalty: float = 1.15
     seed: Optional[int] = None
+    # ---- "based on user text" controls ------------------------------------
+    seed_text: str = ""                         # user's draft / starting lyrics
+    ai_addition_pct: int = 100                  # tokens to add ≈ len(seed) * pct/100
+    rhyme_pct: int = 0                          # target rhyme density (soft prompt hint)
 
 
 @dataclass
@@ -66,17 +71,45 @@ class LyricsGenerator:
     def generate(self, request: GenerationRequest) -> GenerationResult:
         """Run a single generation call and return the result."""
 
+        # 0% AI addition + non-empty seed text → return user's text untouched.
+        if request.seed_text.strip() and request.ai_addition_pct <= 0:
+            seed_body = request.seed_text.strip()
+            title = (
+                (request.title or "").strip()
+                or self._guess_title(seed_body)
+                or "Без названия"
+            )
+            return GenerationResult(
+                title=title,
+                text=seed_body,
+                prompt="",
+                model=request.model,
+                params={
+                    "max_new_tokens": 0,
+                    "ai_addition_pct": 0,
+                    "rhyme_pct_target": int(request.rhyme_pct),
+                    "rhyme_pct_actual": _rhyme_rate(seed_body),
+                    "language": request.language,
+                    "genre": request.genre,
+                    "note": "AI ничего не добавил (ползунок «доля AI» = 0%).",
+                },
+            )
+
         tokenizer, model = self._load(request.model)
-        prompt = self._build_prompt(request)
-        text = self._sample(tokenizer, model, prompt, request)
-        title = (request.title or "").strip() or self._guess_title(text) or "Без названия"
+        header, full_prompt = self._build_prompt(request)
+        sampled, effective_max = self._sample(tokenizer, model, full_prompt, request)
+        body = self._postprocess(sampled, header)
+        title = (request.title or "").strip() or self._guess_title(body) or "Без названия"
         return GenerationResult(
             title=title,
-            text=self._postprocess(text, prompt),
-            prompt=prompt,
+            text=body,
+            prompt=header,
             model=request.model,
             params={
-                "max_new_tokens": request.max_new_tokens,
+                "max_new_tokens": effective_max,
+                "ai_addition_pct": int(request.ai_addition_pct),
+                "rhyme_pct_target": int(request.rhyme_pct),
+                "rhyme_pct_actual": _rhyme_rate(body),
                 "temperature": request.temperature,
                 "top_p": request.top_p,
                 "top_k": request.top_k,
@@ -84,6 +117,7 @@ class LyricsGenerator:
                 "seed": request.seed,
                 "genre": request.genre,
                 "language": request.language,
+                "had_seed_text": bool(request.seed_text.strip()),
             },
         )
 
@@ -140,19 +174,33 @@ class LyricsGenerator:
         return tokenizer, model
 
     @staticmethod
-    def _build_prompt(req: GenerationRequest) -> str:
-        """Turn structured request fields into a single text prompt."""
+    def _build_prompt(req: GenerationRequest) -> Tuple[str, str]:
+        """Turn the request into ``(header, full_prompt)``.
 
+        ``header`` is the scaffold (Title / Theme / ...) we want to strip from
+        the model output later. ``full_prompt`` is what we actually feed the
+        model — header + the user's seed text (if any), so the model continues
+        it instead of inventing from scratch.
+        """
+
+        seed = req.seed_text.strip()
         lang = req.language
         if lang == "auto":
-            lang = "ru" if _looks_russian(req.title + " " + req.theme) else "en"
-        lines = []
+            sample = " ".join([req.title or "", req.theme or "", seed])
+            lang = "ru" if _looks_russian(sample) else "en"
+
+        lines: List[str] = []
         if lang == "ru":
             lines.append(f"Название: {req.title or '—'}")
             if req.genre and req.genre.lower() != "auto":
                 lines.append(f"Жанр: {req.genre}")
             if req.theme:
                 lines.append(f"Тема: {req.theme}")
+            if req.rhyme_pct > 0:
+                lines.append(
+                    f"Стиль: рифмуй окончания строк (~{req.rhyme_pct}% строк "
+                    "должны рифмоваться попарно)."
+                )
             lines.append("Текст песни:")
         else:
             lines.append(f"Title: {req.title or '—'}")
@@ -160,10 +208,26 @@ class LyricsGenerator:
                 lines.append(f"Genre: {req.genre}")
             if req.theme:
                 lines.append(f"Theme: {req.theme}")
+            if req.rhyme_pct > 0:
+                lines.append(
+                    f"Style: rhyme line endings (~{req.rhyme_pct}% of lines "
+                    "should rhyme in pairs)."
+                )
             lines.append("Lyrics:")
-        return "\n".join(lines) + "\n"
+        header = "\n".join(lines) + "\n"
 
-    def _sample(self, tokenizer: Any, model: Any, prompt: str, req: GenerationRequest) -> str:
+        # Continuation mode: paste the user's draft after the header so the
+        # model extends it instead of starting from scratch.
+        full = header + (seed + "\n" if seed else "")
+        return header, full
+
+    def _sample(
+        self,
+        tokenizer: Any,
+        model: Any,
+        prompt: str,
+        req: GenerationRequest,
+    ) -> Tuple[str, int]:
         import torch
 
         if req.seed is not None:
@@ -172,12 +236,35 @@ class LyricsGenerator:
                 torch.cuda.manual_seed_all(int(req.seed))
 
         device = next(model.parameters()).device
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+        # Scale max_new_tokens by the user's seed-text length and AI-addition %.
+        seed_token_count = 0
+        if req.seed_text.strip():
+            seed_token_count = len(
+                tokenizer.encode(req.seed_text, add_special_tokens=False)
+            )
+        if seed_token_count and req.ai_addition_pct > 0:
+            scaled = int(seed_token_count * req.ai_addition_pct / 100)
+            effective_max = max(16, min(int(req.max_new_tokens), scaled))
+        else:
+            effective_max = int(req.max_new_tokens)
+
+        # Truncate input from the start if it would not fit alongside the
+        # requested generation length. We keep the END of the user's draft so
+        # the model continues from the most recent context.
+        ctx_limit = getattr(model.config, "max_position_embeddings", 1024) or 1024
+        max_input_len = max(64, int(ctx_limit) - effective_max - 8)
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_input_len,
+        ).to(device)
 
         gen_kwargs = {**DEFAULT_GENERATION_PARAMS}
         gen_kwargs.update(
             {
-                "max_new_tokens": int(req.max_new_tokens),
+                "max_new_tokens": effective_max,
                 "temperature": float(req.temperature),
                 "top_p": float(req.top_p),
                 "top_k": int(req.top_k),
@@ -189,14 +276,17 @@ class LyricsGenerator:
         )
         with torch.no_grad():
             output = model.generate(**inputs, **gen_kwargs)
-        return tokenizer.decode(output[0], skip_special_tokens=True)
+        return tokenizer.decode(output[0], skip_special_tokens=True), effective_max
 
     @staticmethod
-    def _postprocess(generated: str, prompt: str) -> str:
+    def _postprocess(generated: str, header: str) -> str:
+        """Strip the scaffold header from the model output. The user's seed
+        text — if any — is *kept* because it was pasted *after* the header."""
+
         text = generated
-        if text.startswith(prompt):
-            text = text[len(prompt):]
-        # Strip trailing repetitions of the prompt scaffold if the model echoed it.
+        if text.startswith(header):
+            text = text[len(header):]
+        # Strip a second scaffold echo if the model decided to start a new song.
         for marker in ("Title:", "Название:"):
             idx = text.find(marker, 1)
             if idx > 0:
@@ -225,10 +315,56 @@ class LyricsGenerator:
 
 
 # ---------------------------------------------------------------------------
-# Language detection
+# Language + rhyme heuristics
 # ---------------------------------------------------------------------------
 
 def _looks_russian(text: str) -> bool:
     cyr = sum("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
     lat = sum("a" <= ch.lower() <= "z" for ch in text)
     return cyr > lat
+
+
+_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+")
+
+
+def _line_ending(line: str, n: int = 3) -> str:
+    """Return the last ``n`` letters of the last word of a line, lower-cased.
+
+    Empty if the line has no letter words.
+    """
+
+    words = _WORD_RE.findall(line)
+    if not words:
+        return ""
+    last = words[-1].lower()
+    return last[-n:] if len(last) >= n else last
+
+
+def _rhyme_rate(text: str) -> float:
+    """Estimate, as a percentage, how many lines in ``text`` rhyme with a
+    neighbour within ±2 lines (covers AABB and ABAB schemes).
+
+    Deliberately simple heuristic — last-3-letters matching of the final word.
+    Good enough to surface a rough number to the user, not a competition-grade
+    rhyme detector.
+    """
+
+    endings = [_line_ending(line) for line in text.splitlines()]
+    endings = [e for e in endings if e]
+    n = len(endings)
+    if n < 2:
+        return 0.0
+    rhyming = 0
+    for i, e in enumerate(endings):
+        neighbours = []
+        if i + 1 < n:
+            neighbours.append(endings[i + 1])
+        if i + 2 < n:
+            neighbours.append(endings[i + 2])
+        if i - 1 >= 0:
+            neighbours.append(endings[i - 1])
+        if i - 2 >= 0:
+            neighbours.append(endings[i - 2])
+        if any(neigh and neigh == e for neigh in neighbours):
+            rhyming += 1
+    return round(rhyming / n * 100, 1)
