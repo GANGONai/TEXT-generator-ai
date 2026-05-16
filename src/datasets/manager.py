@@ -12,12 +12,88 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from ..logger import get_logger
 from ..utils import filter_songs, new_id, normalise_lyrics, now_iso, read_json, write_json
+
+# Recognised header lines at the top of a TXT song block. Case-insensitive,
+# tolerates leading/trailing whitespace, accepts both Russian and English
+# field names. The third group lets ``Название:`` sit on its own line *or*
+# carry the value inline (``Название: Ночной город``).
+_TXT_HEADER_RE = re.compile(
+    r"^\s*(?P<field>название|title|жанр|genre|текст|lyrics)\s*:\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
+_TXT_TITLE_FIELDS = {"название", "title"}
+_TXT_GENRE_FIELDS = {"жанр", "genre"}
+_TXT_BODY_FIELDS = {"текст", "lyrics"}
+
+
+def _blocks_have_headers(blocks: List[str]) -> bool:
+    """Return True if any block looks like a structured song (has a
+    ``Название:`` / ``Title:`` / ``Жанр:`` / ``Genre:`` / ``Текст:`` /
+    ``Lyrics:`` header on one of its first three non-empty lines).
+    """
+
+    for block in blocks:
+        head_lines = [ln for ln in block.splitlines()[:5] if ln.strip()][:3]
+        for line in head_lines:
+            if _TXT_HEADER_RE.match(line):
+                return True
+    return False
+
+
+def _parse_txt_block(block: str, *, fallback_title: str) -> Dict[str, Any]:
+    """Parse a single block from a structured TXT file.
+
+    Recognises ``Название:`` / ``Title:`` / ``Жанр:`` / ``Genre:`` / ``Текст:``
+    / ``Lyrics:`` headers at the top of the block. Everything after the
+    headers (or after a ``Текст:`` line) is treated as the song body.
+    """
+
+    title: Optional[str] = None
+    genre: Optional[str] = None
+    body_lines: List[str] = []
+    consuming_body = False
+
+    for line in block.splitlines():
+        if consuming_body:
+            body_lines.append(line)
+            continue
+        match = _TXT_HEADER_RE.match(line)
+        if match:
+            field_name = match.group("field").lower()
+            value = match.group("value").strip()
+            if field_name in _TXT_TITLE_FIELDS:
+                if value:
+                    title = value
+                # No inline value → next non-header line(s) still belong to
+                # other headers; keep scanning.
+                continue
+            if field_name in _TXT_GENRE_FIELDS:
+                if value:
+                    genre = value
+                continue
+            if field_name in _TXT_BODY_FIELDS:
+                # Body starts here. Inline value (rare) joins the body.
+                if value:
+                    body_lines.append(value)
+                consuming_body = True
+                continue
+        # First non-header line ⇒ body starts here (no ``Текст:`` marker).
+        body_lines.append(line)
+        consuming_body = True
+
+    body = "\n".join(body_lines).strip()
+    return {
+        "title": (title or fallback_title).strip(),
+        "text": body,
+        "genre": genre,
+    }
 
 log = get_logger(__name__)
 
@@ -160,12 +236,56 @@ class SongManager:
         return added
 
     def import_from_txt(self, raw: str, default_title: str = "Песня") -> int:
-        """Split raw text on blank lines and import each block as a song."""
+        """Import one or many songs from a TXT file.
 
-        blocks = [b.strip() for b in raw.replace("\r\n", "\n").split("\n\n\n") if b.strip()]
-        if len(blocks) <= 1:
-            # No triple-newline separator — treat the whole file as one song.
-            return self.import_texts([{"title": default_title, "text": raw}])
+        Three supported layouts (auto-detected):
+
+        1) **Structured** — recommended for several songs with title & genre.
+           Each song is a block separated from the next by **two blank lines**
+           (i.e. three newlines). Within a block, the first lines may be any
+           combination of ``Название: …`` / ``Title: …``, ``Жанр: …`` /
+           ``Genre: …``, and ``Текст:`` / ``Lyrics:``. Anything after a
+           ``Текст:`` line (or after the last header line) is the song body.
+
+           Example::
+
+               Название: Ночной город
+               Жанр: рок
+               Текст:
+               Я иду по улице ночной
+               Город спит, но не со мной
+
+               Свети, моя звезда
+
+
+               Название: Морская
+               Жанр: шансон
+               Море, море, мир бездонный
+
+        2) **Plain multi-song** — blocks separated by two blank lines but no
+           header markers. Each block becomes a song titled
+           ``<default_title> #1``, ``#2``, …
+
+        3) **Single song** — no two-blank-line separator anywhere. The whole
+           file is imported as one song titled ``default_title``.
+        """
+
+        text_norm = raw.replace("\r\n", "\n").replace("\r", "\n")
+        # 3+ consecutive newlines split songs; 2 newlines are a verse break.
+        blocks = [b for b in re.split(r"\n{3,}", text_norm) if b.strip()]
+        if not blocks:
+            return 0
+
+        if _blocks_have_headers(blocks):
+            items = [
+                _parse_txt_block(block, fallback_title=f"{default_title} #{i + 1}")
+                for i, block in enumerate(blocks)
+            ]
+            return self.import_texts(items)
+
+        # No headers anywhere — fall back to the historical behaviour.
+        if len(blocks) == 1:
+            return self.import_texts([{"title": default_title, "text": text_norm}])
         items = [
             {"title": f"{default_title} #{i + 1}", "text": block}
             for i, block in enumerate(blocks)

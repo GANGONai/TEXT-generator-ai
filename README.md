@@ -149,6 +149,31 @@ Environment variables: `LYRICS_AI_DATA`, `LYRICS_AI_PORT`, `LYRICS_AI_HOST`,
 2. **Upload lyrics tab** → select the model → paste a song into the right pane
    → *Save song*. Repeat for as many songs as you want (or use *Import* to load
    a `.txt`/`.csv`). 20–50 songs is usually enough for a noticeable style.
+
+   Bulk-import TXT layout (UTF-8). Songs are separated by **two blank lines**,
+   each block may start with optional `Название:` / `Жанр:` / `Текст:` headers
+   (or their English equivalents `Title:` / `Genre:` / `Lyrics:`):
+
+   ```
+   Название: Ночной город
+   Жанр: рок
+   Текст:
+   Я иду по улице ночной
+   Город спит, но не со мной
+
+   Свети, моя звезда
+   Не гасни никогда
+
+
+   Название: Морская
+   Жанр: шансон
+   Море, море, мир бездонный
+   Долгий путь и тёмный путь
+   ```
+
+   Headers are optional — a file with just blocks of text is imported as
+   "Песня #1", "#2", … For CSV use a UTF-8 file with `text` (required), and
+   `title` / `genre` (optional) columns.
 3. Still in *Upload lyrics* → set epochs (3 is a sane default) → *Start training*.
    Watch progress in the status box; ETA and percent update in real time.
 4. **Generator tab** → select the trained model → enter a title / theme →
