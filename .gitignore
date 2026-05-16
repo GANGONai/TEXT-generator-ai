@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Runtime data — never commit user models / songs / generations.
+data/
+!data/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
