@@ -96,9 +96,14 @@ def build_models_tab(models: ModelManager) -> None:
                 value=_initial[0] if _initial else None,
                 interactive=True,
             )
-            exp_btn = gr.Button("Экспортировать")
-            exp_file = gr.File(label="Архив", visible=False)
-            exp_status = gr.Markdown("")
+            exp_btn = gr.Button("Экспортировать", variant="primary")
+            exp_status = gr.Markdown(
+                "_После нажатия появится ссылка на скачивание ZIP — кликните по ней._"
+            )
+            exp_file = gr.File(
+                label="📦 Готовый архив (нажмите для скачивания)",
+                interactive=False,
+            )
 
         # IMPORT
         with gr.Column():
@@ -170,13 +175,18 @@ def build_models_tab(models: ModelManager) -> None:
             return None, "Выберите модель."
         try:
             path = export_model(models, name)
-            return str(path), f"Экспорт готов: `{path.name}`"
         except Exception as exc:
-            return None, f"Ошибка: {exc}"
+            return None, f"❌ Ошибка экспорта: {exc}"
+        size_mb = path.stat().st_size / (1024 * 1024)
+        msg = (
+            f"✅ Экспорт готов: **{path.name}** ({size_mb:.1f} МБ)\n\n"
+            "Нажмите на файл ниже, чтобы скачать ZIP к себе на компьютер. "
+            f"На сервере он также лежит в `{path}` "
+            "(в Colab — в `/content/TEXT-generator-ai/data/exports/`)."
+        )
+        return str(path), msg
 
-    exp_btn.click(fn=do_export, inputs=exp_dd, outputs=[exp_file, exp_status]).then(
-        fn=lambda p: gr.update(visible=p is not None), inputs=exp_file, outputs=exp_file
-    )
+    exp_btn.click(fn=do_export, inputs=exp_dd, outputs=[exp_file, exp_status])
 
     def do_import(
         file_obj: Any,
