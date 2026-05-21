@@ -1,0 +1,23 @@
+# fat_photo — runtime dependencies.
+#
+# Everything here is free (Apache-2.0 / MIT / CreativeML OpenRAIL-M) and runs
+# on a free Google Colab T4 GPU.
+#
+# Core image + UI
+numpy>=1.23
+Pillow>=9.0
+gradio>=4.20
+
+# Landmark detection (face + pose + person segmentation). MediaPipe ships
+# pretrained models inside the wheel — no extra downloads needed.
+mediapipe>=0.10.9
+
+# Optional AI refinement step (Stable Diffusion img2img).
+# These are needed only if the user ticks the "AI-улучшение" checkbox.
+# Colab pre-installs torch; pinning a lower bound is enough.
+torch>=2.0
+diffusers>=0.27
+transformers>=4.36
+accelerate>=0.25
+safetensors>=0.4
+huggingface_hub>=0.20
